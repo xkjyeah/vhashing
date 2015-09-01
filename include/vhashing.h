@@ -58,6 +58,8 @@ struct HashTableBase {
     entries_per_bucket(entries_per_bucket),
     num_entries(num_buckets * entries_per_bucket),
 
+    alloc(num_blocks),
+
     emptyKey(emptyKey),
     hasher(hasher),
     isequal(equals)
@@ -111,6 +113,11 @@ struct HashTableBase {
     }
     return alloc[it->block_index];
   }
+	/* for the user */
+	__device__ __host__
+	inline iterator find(const Key &k) const {
+		return this->tryfind(k, true);
+	}
 	/* for internal use -- where thread matters
 	 *
 	 * returns end() if not found.
@@ -488,7 +495,7 @@ template <class Key,
           class Equal,
           class memspace = device_memspace>
 class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
-  private:
+  public:
   typedef HashTableBase<Key,Value,Hash,Equal> parent_type;
 
   typename vector_type<typename parent_type::HashEntry, memspace>::type hash_table_shared;
@@ -497,7 +504,6 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
   typename vector_type<Value, memspace>::type    data_shared;
   typename vector_type<int32_t, memspace>::type  offsets_shared;
 
-  public:
   HashTable(int num_buckets,
                 int entries_per_bucket,
                 int num_blocks,
@@ -511,26 +517,72 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
     data_shared(num_blocks + 1),
     offsets_shared(num_blocks + 2)
   {
+    using thrust::raw_pointer_cast;
     /* prepare the hash table */
-    this->hash_table = &hash_table_shared[0];
+    this->hash_table = raw_pointer_cast(&hash_table_shared[0]);
 
     /* bucket locks */
-    this->bucket_locks = &bucket_locks_shared[0];
+    this->bucket_locks = raw_pointer_cast(&bucket_locks_shared[0]);
 
     /* allocator -- data*/
-    this->alloc.data = &data_shared[0];
+    this->alloc.data = raw_pointer_cast(&data_shared[0]);
 
     /* allocator -- offsets */
     thrust::sequence(
                   offsets_shared.begin(),
                   offsets_shared.end(),
                   1);
-    this->alloc.offsets = &offsets_shared[0];
-    this->alloc.mutex = (int*)&offsets_shared[num_blocks];
+    this->alloc.num_elems = num_blocks;
+    this->alloc.offsets = raw_pointer_cast(&offsets_shared[0]);
+    this->alloc.mutex = (int*)raw_pointer_cast(&offsets_shared[num_blocks]);
     offsets_shared[num_blocks] = 0;
 
-    this->alloc.link_head = (int*) &offsets_shared[num_blocks + 1];
+    this->alloc.link_head = (int*)raw_pointer_cast(&offsets_shared[num_blocks + 1]);
     offsets_shared[num_blocks + 1] = num_blocks - 1;
+  }
+
+  template <typename xmemspace>
+  HashTable(const HashTable<Key, Value, Hash, Equal, xmemspace> &other)
+  : parent_type(other.num_buckets,
+              other.entries_per_bucket,
+              other.alloc.num_elems,
+              other.emptyKey,
+              other.hasher,
+              other.isequal),
+    hash_table_shared(other.num_buckets * other.entries_per_bucket,
+              typename parent_type::HashEntry{other.emptyKey, 0, 0}),
+    bucket_locks_shared(other.num_buckets, 0),
+    data_shared(other.alloc.num_elems + 1),
+    offsets_shared(other.alloc.num_elems + 2)
+  {
+    using thrust::raw_pointer_cast;
+    thrust::copy(
+        other.hash_table_shared.begin(),
+        other.hash_table_shared.end(),
+        hash_table_shared.begin()
+        );
+    thrust::copy(
+        other.bucket_locks_shared.begin(),
+        other.bucket_locks_shared.end(),
+        bucket_locks_shared.begin()
+        );
+    thrust::copy(
+        other.data_shared.begin(),
+        other.data_shared.end(),
+        data_shared.begin()
+        );
+    thrust::copy(
+        other.offsets_shared.begin(),
+        other.offsets_shared.end(),
+        offsets_shared.begin()
+        );
+    this->hash_table = raw_pointer_cast(&hash_table_shared[0]);
+    this->bucket_locks = raw_pointer_cast(&bucket_locks_shared[0]);
+    this->alloc.data = raw_pointer_cast(&data_shared[0]);
+    this->alloc.offsets = raw_pointer_cast(&offsets_shared[0]);
+
+    this->alloc.mutex = raw_pointer_cast(&offsets_shared[other.alloc.num_elems]);
+    this->alloc.link_head = raw_pointer_cast(&offsets_shared[other.alloc.num_elems + 1]);
   }
 
 };

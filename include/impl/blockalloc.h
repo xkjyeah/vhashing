@@ -28,6 +28,9 @@ struct BlockAllocBase {
   int32_t  *offsets;
 	int *mutex, *link_head;
 
+  BlockAllocBase(int num_elems = 0)
+    : num_elems(num_elems) {}
+
 	__device__ __host__
 	inline Value &operator[](int32_t pointer) const {
 		assert (pointer > 0 && pointer <= num_elems);
