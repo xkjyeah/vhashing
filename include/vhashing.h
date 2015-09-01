@@ -3,8 +3,11 @@
 #include "impl/lockset.h"
 #include "impl/blockalloc.h"
 #include "impl/memspace.h"
+#include "impl/query.h"
 
 #include <memory>
+#include <thrust/sort.h>
+#include <thrust/unique.h>
 
 namespace vhashing {
 
@@ -28,8 +31,11 @@ struct HashEntryBase {
 template <class Key,
           class Value,
           class Hash,
-          class Equal>
+          class Equal = thrust::equal_to<Value> >
 struct HashTableBase {
+  typedef Key KeyType;
+  typedef Value ValueType;
+
   struct iterator;
 
   int     num_buckets;
@@ -98,7 +104,7 @@ struct HashTableBase {
    * */
 	__device__ __host__
 	Value &operator[](const HashEntry &he) const {
-		return alloc.blocks[he.block_index];
+		return alloc[he.block_index];
 	}
 	/** Access the value associated with key k.
    *
@@ -483,6 +489,89 @@ struct HashTableBase {
 		return iterator(*this, (int32_t) -2);
 	}
 
+  /* Bulk allocation methods */
+
+  /** Allocates a list of keys -- assumes no duplicates */
+  __host__
+  void AllocKeys(const std::vector<Key> &keys) {
+    thrust::device_vector<Key> d_keys(keys);
+    AllocKeys(&d_keys);
+  }
+
+  __host__
+  void AllocKeys(thrust::device_vector<Key> *keys) {
+    thrust::sort(keys->begin(), keys->end());
+    auto last_it = thrust::unique(keys->begin(), keys->end());
+
+    AllocKeysNoDups(keys->begin(), last_it);
+  }
+
+#ifdef __NVCC__
+  /**
+   * This is only meant to be used with a device_memspace
+   * */
+  __host__
+  void AllocKeysNoDups(
+      typename thrust::device_vector<Key>::const_iterator d_begin,
+      typename thrust::device_vector<Key>::const_iterator d_end,
+      bool retry = false
+      ) {
+    using namespace thrust;
+
+    int num_elems = thrust::distance(d_begin, d_end);
+    bool all_successful = true;
+
+    do {
+      thrust::device_vector<Key> d_keysRequiringAllocation(num_elems);
+
+//      auto last_it = thrust::copy_if(d_begin, d_end,
+//          d_keysRequiringAllocation.begin(),
+//          detail::RequiresAllocation<_BlockMap, Key>{*this});
+      auto last_it = Compactify(d_begin, d_end,
+          d_keysRequiringAllocation.begin(),
+          detail::RequiresAllocation<HashTableBase>{*this});
+
+      /* request the empty blocks */
+      int numJobs = thrust::distance(d_keysRequiringAllocation.begin(), last_it);
+      int tpb = 512;
+      int numBlocks = (numJobs + tpb - 1) / tpb;
+
+      printf("NUM ELEMS: %d\n", num_elems);
+      printf("NUM JOBS: %d\n", numJobs);
+
+      if (numJobs == 0)
+        return;
+
+      int ptr = alloc.allocate_n(numJobs);
+      device_vector<int> success(numJobs + 1);
+      device_ptr<int> unsuccessful(&success[numJobs]);
+
+      *unsuccessful = 0;
+      detail::TryAllocateKernel<<<numBlocks, tpb>>>
+            (*this,
+            raw_pointer_cast(&d_keysRequiringAllocation[0]),
+            raw_pointer_cast(&success[0]),
+            ptr,
+            numJobs);
+      detail::ReturnAllocations<<<numBlocks, tpb>>>
+            (*this,
+             raw_pointer_cast(&success[0]),
+             raw_pointer_cast(unsuccessful),
+             ptr, numJobs);
+
+      all_successful = !((int)*unsuccessful);
+    } while (retry && !all_successful);
+  }
+#endif
+
+  __host__
+  void AllocKeysNoDups(const thrust::device_vector<Key> &d_keys,
+                       bool retry = false) {
+    AllocKeysNoDups(d_keys.begin(), d_keys.end(), retry);
+  }
+
+
+
 };
 
 /**
@@ -503,6 +592,9 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
 
   typename vector_type<Value, memspace>::type    data_shared;
   typename vector_type<int32_t, memspace>::type  offsets_shared;
+
+  template <typename T> using map_unique_ptr = std::unique_ptr<T, detail::memspace_deleter<memspace> >;
+  typedef map_unique_ptr<typename parent_type::HashEntry> HashEntriesPtr;
 
   HashTable(int num_buckets,
                 int entries_per_bucket,
@@ -540,6 +632,30 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
     this->alloc.link_head = (int*)raw_pointer_cast(&offsets_shared[num_blocks + 1]);
     offsets_shared[num_blocks + 1] = num_blocks - 1;
   }
+
+  /* copy constructor -- need to update our pointers,
+   * but we let the HashTableBase's default copy constructor
+   * take care of the other values */
+  HashTable(const HashTable &other)
+  : parent_type(other),
+    hash_table_shared(other.hash_table_shared),
+    bucket_locks_shared(other.bucket_locks_shared),
+    data_shared(other.data_shared),
+    offsets_shared(other.offsets_shared)
+  {
+    using thrust::raw_pointer_cast;
+
+    this->hash_table = raw_pointer_cast(&hash_table_shared[0]);
+    this->bucket_locks = raw_pointer_cast(&bucket_locks_shared[0]);
+    this->alloc.data = raw_pointer_cast(&data_shared[0]);
+    this->alloc.offsets = raw_pointer_cast(&offsets_shared[0]);
+
+    this->alloc.mutex = raw_pointer_cast(&offsets_shared[other.alloc.num_elems]);
+    this->alloc.link_head = raw_pointer_cast(&offsets_shared[other.alloc.num_elems + 1]);
+  }
+  
+  /* move constructor -- just use default */
+  HashTable(HashTable &&other) = default;
 
   template <typename xmemspace>
   HashTable(const HashTable<Key, Value, Hash, Equal, xmemspace> &other)
@@ -584,7 +700,55 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
     this->alloc.mutex = raw_pointer_cast(&offsets_shared[other.alloc.num_elems]);
     this->alloc.link_head = raw_pointer_cast(&offsets_shared[other.alloc.num_elems + 1]);
   }
+  
+  //////// Bulk query functions
+  
+  /**
+   * Returns a [entries, n] = tuple<HashEntriesPtr, int>
+   *
+   * HashEntriesPtr is a unique_ptr with a custom deleter.
+   * n is the number of entries returned.
+   *
+   * Such that every entry in entries satisfies the following condition:
+   *
+   * filter.operator() (entry, hashtable[entry]) == true
+   *
+   * */
+	template<class Fil = detail::AlwaysTrue>
+	std::pair<HashEntriesPtr, int> Filter(Fil filter = Fil()) const {
+    auto d_mem = thrust::malloc(
+        memspace(),
+        sizeof(typename parent_type::HashEntry) * this->num_entries);
 
+    auto d_start = typename ptr_type<typename parent_type::HashEntry, memspace>::type(
+            (typename parent_type::HashEntry*) d_mem.get() );
+    decltype(d_start) d_end;
+
+    d_end = thrust::copy_if(
+        hash_table_shared.begin(),
+        hash_table_shared.end(),
+        d_start,
+        detail::Filter_<parent_type, Fil>(*this, filter));
+
+    return std::make_pair(
+                HashEntriesPtr(thrust::raw_pointer_cast(d_start)),
+                thrust::distance(d_start, d_end) );
+	}
+
+  /**
+   * Applies some function op to every entry in the hash table,
+   * if the entry is not empty.
+   *
+   * Runs op.operator() (entry, 
+   * */
+	template<class Op>
+	__host__
+  void Apply(Op op = Op()) {
+		/* sweep */
+		thrust::for_each(	hash_table_shared.begin(),
+											hash_table_shared.end(),
+											detail::Apply_<parent_type, Op>(*this, op));
+  }
 };
 
 

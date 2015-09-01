@@ -37,6 +37,9 @@ struct BlockAllocBase {
 		return data[pointer];
 	}
   
+  /** For bulk allocations to reduce contention on
+   * link_head
+   * */
   __host__
   int32_t allocate_n(int n) {
     thrust::device_ptr<int> d_link_head(link_head);

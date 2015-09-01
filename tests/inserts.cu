@@ -28,10 +28,11 @@ struct kequal {
 };
 
 typedef vhashing::HashTable<int3, Data, hasher, kequal, vhashing::device_memspace> BM;
+typedef vhashing::HashTableBase<int3, Data, hasher, kequal> BMBase;
 typedef vhashing::HashTable<int3, Data, hasher, kequal, vhashing::std_memspace> BMH;
 
 __global__
-void kernel(int3 *keys, Data *values, int n, int tasks, BM bm) {
+void kernel(int3 *keys, Data *values, int n, int tasks, BMBase bm) {
 	int base = blockDim.x * blockIdx.x  +  threadIdx.x;
 
 	for (int i=0; i<tasks; i++) {

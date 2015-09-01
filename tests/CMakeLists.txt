@@ -19,4 +19,8 @@ endfunction()
 
 build_test(lock)
 build_test(inserts)
+build_test(voxelblocks)
+build_test(erases)
+build_test(filter)
+build_test(apply)
 

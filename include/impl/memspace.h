@@ -5,22 +5,15 @@
 
 namespace vhashing {
 
-struct host_memspace {
-};
-struct std_memspace {
-};
-struct device_memspace {
-};
+typedef thrust::device_system_tag device_memspace;
+typedef thrust::host_system_tag host_memspace;
+typedef thrust::host_system_tag std_memspace;
 
 template <typename T, typename M>
 struct ptr_type {};
 
 template <typename T>
 struct ptr_type<T, host_memspace> {
-  typedef T* type;
-};
-template <typename T>
-struct ptr_type<T, std_memspace> {
   typedef T* type;
 };
 template <typename T>
@@ -34,10 +27,6 @@ struct vector_type {};
 template <typename T>
 struct vector_type<T, host_memspace> {
   typedef thrust::host_vector<T> type;
-};
-template <typename T>
-struct vector_type<T, std_memspace> {
-  typedef std::vector<T> type;
 };
 template <typename T>
 struct vector_type<T, device_memspace> {
@@ -75,22 +64,11 @@ void memspace_fill(T* start, T* end, const T &t, device_memspace) {
 }
 
 
-template <typename T>
-struct memspace_deleter {};
-
-template <>
-struct memspace_deleter<host_memspace> {
+template <typename memspace>
+struct memspace_deleter {
   template <typename T>
   void operator() (const T *t) {
-    free(t);
-  }
-};
-
-template <>
-struct memspace_deleter<device_memspace> {
-  template <typename T>
-  void operator() (const T *t) {
-    cudaSafeCall(cudaFree(t));
+    thrust::free(memspace(), (void*)t);
   }
 };
 
