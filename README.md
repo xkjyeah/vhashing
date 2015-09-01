@@ -23,7 +23,7 @@ This ensures that you don't copy unwanted `thrust::*_vector` structures.
 
 In host code, you should use one of:
 
-1. `HashTable<..., host_memspace>` -- uses `host_vector` (page-locked) in the underlying code
+1. `HashTable<..., host_memspace>` -- uses `host_vector` in the underlying code
 1. `HashTable<..., device_memspace>` -- uses `device_vector` -- therefore accessible from device code.
 However, it is not currently accessible from host code.
 Therefore `hashTableDevice[key]` will give you a segfault!
