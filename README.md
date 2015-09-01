@@ -9,7 +9,7 @@ Simply put, to be "neater" and to use thrust classes/functions where possible.
 Usage
 -----
 
-Refer to tests/voxelblocks.cu.
+Refer to `tests/voxelblocks.cu`.
 
 When using the hash table as a function to a kernel call, use HashTableBase:
 
@@ -27,11 +27,12 @@ In host code, you should use one of:
 1. `HashTable<..., device_memspace>` -- uses `device_vector` -- therefore accessible from device code.
 However, it is not currently accessible from host code.
 Therefore `hashTableDevice[key]` will give you a segfault!
-1. `HashTable<..., std_memspace>` -- uses `std::vector` -- no difference from `host_vector` at the moment.
 
 You can use copy constructors to convert between memory spaces, e.g.
 
     auto ht = HashTable<..., host_memspace>(ht_device)
+
+For manipulation of data in the hash table, follow the examples at `tests/filter.cu` and `tests/apply.cu`.
 
 Bulk allocation
 -------
@@ -42,6 +43,8 @@ Under some circumstances you might find it faster to use `thrust::sort` and
 If you use `thrust::unique`, you will automatically get a count of the number of elements
 you want to insert,
 so you can avoid each thread calling `atomicSub(..., 1)` on the allocator.
+
+Use the AllocKeys() functions (TODO: test case, examples)
 
 Caveats
 ------
