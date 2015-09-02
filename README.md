@@ -37,14 +37,25 @@ For manipulation of data in the hash table, follow the examples at `tests/filter
 Bulk allocation
 -------
 
+Reference: `tests/bulkalloc.c`
+
 Under some circumstances you might find it faster to use `thrust::sort` and
 `thrust::unique` to avoid unnecessary conflicts.
 
-If you use `thrust::unique`, you will automatically get a count of the number of elements
-you want to insert,
-so you can avoid each thread calling `atomicSub(..., 1)` on the allocator.
+If you use `thrust::unique`, you will automatically get a count of the number of elements you want to insert,
+so you can avoid each thread calling `atomicSub(..., 1)` on the allocator
+(which is rather slow).
 
-Use the AllocKeys() functions (TODO: test case, examples)
+Instead, you use `AllocKeysNoDups()` (or if you want the program to do `::sort()`
+and `::unique()` for you, `AllocKeys()`).
+The other benefit is that you can force the program to retry until all conflicting inserts have been resolved:
+
+    ht.AllocKeysNoDups(keys.begin(), keys.end(), /*retry =*/ true);
+
+Streaming
+------
+
+TODO
 
 Caveats
 ------
@@ -54,7 +65,7 @@ inserts and erases are not safe**.
 Concurrent **inserts** are safe, as are concurrent **erases**, but not together.
 2. If you can tolerate some loss, use `try_insert` and `try_erase`, which gives up
 if the lock on the bucket cannot be taken.
-If you don't, there might be a small possibility of deadlock -- you have been warned.
+If you don't, there might be a small possibility of livelock (due to warps moving in lock step) -- you have been warned.
 (Recall Nießner's voxel hashing -- if some voxel blocks cannot be allocated, we simply let the voxel block be allocated in the next frame)
 
 Very big caveat

@@ -524,10 +524,7 @@ struct HashTableBase {
     do {
       thrust::device_vector<Key> d_keysRequiringAllocation(num_elems);
 
-//      auto last_it = thrust::copy_if(d_begin, d_end,
-//          d_keysRequiringAllocation.begin(),
-//          detail::RequiresAllocation<_BlockMap, Key>{*this});
-      auto last_it = Compactify(d_begin, d_end,
+      auto last_it = thrust::copy_if(d_begin, d_end,
           d_keysRequiringAllocation.begin(),
           detail::RequiresAllocation<HashTableBase>{*this});
 
@@ -571,7 +568,16 @@ struct HashTableBase {
   }
 
 
-
+#ifdef __NVCC__
+  /** This class needs to access real_insert **/
+  friend void detail::TryAllocateKernel<HashTableBase>(
+    HashTableBase self,
+    Key *keys,
+    int *success,
+    int blockBase,
+    int numJobs
+    );
+#endif
 };
 
 /**
@@ -744,10 +750,12 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
 	template<class Op>
 	__host__
   void Apply(Op op = Op()) {
+#ifndef __CUDA_ARCH__
 		/* sweep */
 		thrust::for_each(	hash_table_shared.begin(),
 											hash_table_shared.end(),
 											detail::Apply_<parent_type, Op>(*this, op));
+#endif
   }
 };
 
